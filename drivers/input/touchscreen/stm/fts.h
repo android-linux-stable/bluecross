@@ -33,6 +33,7 @@
 #define _LINUX_FTS_I2C_H_
 
 #include <linux/device.h>
+#include <linux/input/heatmap.h>
 #include <linux/pm_qos.h>
 #include "fts_lib/ftsSoftware.h"
 #include "fts_lib/ftsHardware.h"
@@ -193,6 +194,24 @@
 /**@}*/
 /*********************************************************/
 
+/* **** LOCAL HEATMAP FEATURE *** */
+#define LOCAL_HEATMAP_WIDTH 7
+#define LOCAL_HEATMAP_HEIGHT 7
+#define LOCAL_HEATMAP_MODE 0xC1
+
+struct heatmap_report {
+	uint8_t prefix; /* always should be 0xA0 */
+	uint8_t mode; /* mode should be 0xC1 for heatmap */
+
+	uint16_t counter; /* LE order, should increment on each heatmap read */
+	int8_t offset_x;
+	uint8_t size_x;
+	int8_t offset_y;
+	uint8_t size_y;
+	/* data is in LE order; order should be enforced after data is read */
+	strength_t data[LOCAL_HEATMAP_WIDTH * LOCAL_HEATMAP_HEIGHT];
+} __attribute__((packed));
+/* **** END **** */
 
 /*
   * Configuration mode
@@ -262,9 +281,27 @@ struct fts_ts_info;
 
 /*
   * Dispatch event handler
+  * Return true if the handler has processed a pointer event
   */
-typedef void (*event_dispatch_handler_t)
+typedef bool (*event_dispatch_handler_t)
 	(struct fts_ts_info *info, unsigned char *data);
+
+/**
+  * Driver touch simulation details
+  */
+struct fts_touchsim{
+	/* touch simulation coordinates */
+	int x, y, x_step, y_step;
+
+	/* timer to run the touch simulation code */
+	struct hrtimer hr_timer;
+
+	struct work_struct work;
+	struct workqueue_struct *wq;
+
+	/* True if the touch simulation is currently running */
+	bool is_running;
+};
 
 /**
   * FTS capacitive touch screen device information
@@ -312,6 +349,8 @@ struct fts_ts_info {
 
 	struct pm_qos_request pm_qos_req;
 
+	struct v4l2_heatmap v4l2;
+
 #ifndef FW_UPDATE_ON_PROBE
 	struct delayed_work fwu_work;	/* Work for fw update */
 	struct workqueue_struct *fwu_workqueue;	/* Fw update work queue */
@@ -326,6 +365,8 @@ struct fts_ts_info {
 #ifdef STYLUS_MODE
 	unsigned long stylus_id;	/* Bitmask for the stylus */
 #endif
+
+	u64 timestamp; /* nanoseconds, acquired during hard interrupt */
 
 	struct fts_hw_platform_data     *board;	/* HW info from device tree */
 	struct regulator        *vdd_reg;	/* DVDD power regulator */
@@ -356,6 +397,14 @@ struct fts_ts_info {
 #ifdef CONFIG_TOUCHSCREEN_TBN
 	struct tbn_context	*tbn;
 #endif
+
+	/* Allow only one thread to execute diag command code*/
+	struct mutex diag_cmd_lock;
+	/* Allow one process to open procfs node */
+	bool diag_node_open;
+
+	/* Touch simulation details */
+	struct fts_touchsim touchsim;
 
 	/* Preallocated i/o read buffer */
 	u8 io_read_buf[READ_CHUNK + DUMMY_FIFO];

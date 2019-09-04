@@ -285,7 +285,6 @@ config PAGE_OWNER_ENABLE_DEFAULT
 
 config DEBUG_FS
 	bool "Debug Filesystem"
-	select SRCU
 	help
 	  debugfs is a virtual file system that kernel developers use to put
 	  debugging files into.  Enable this option to be able to read and
@@ -723,6 +722,19 @@ source "lib/Kconfig.kmemcheck"
 
 source "lib/Kconfig.kasan"
 
+config DEBUG_REFCOUNT
+	bool "Verbose refcount checks"
+	help
+	  Say Y here if you want reference counters (refcount_t and kref) to
+	  generate WARNs on dubious usage. Without this refcount_t will still
+	  be a saturating counter and avoid Use-After-Free by turning it into
+	  a resource leak Denial-Of-Service.
+
+	  Use of this option will increase kernel text size but will alert the
+	  admin of potential abuse.
+
+	  If in doubt, say "N".
+
 endmenu # "Memory Debugging"
 
 config ARCH_HAS_KCOV
@@ -946,6 +958,14 @@ config PANIC_ON_OOPS_VALUE
 	range 0 1
 	default 0 if !PANIC_ON_OOPS
 	default 1 if PANIC_ON_OOPS
+
+config PANIC_ON_WARN_DEFAULT_ENABLE
+	bool "Panic on warn"
+	default n
+	help
+	  Say Y here to enable the kernel to panic when detect warnings. This
+	  has the same effect as setting panic_on_warn on the kernel command
+	  line.
 
 config PANIC_TIMEOUT
 	int "panic timeout"
@@ -2082,6 +2102,16 @@ config TEST_STATIC_KEYS
 	depends on m
 	help
 	  Test the static key interfaces.
+
+	  If unsure, say N.
+
+config BUG_ON_DATA_CORRUPTION
+	bool "Trigger a BUG when data corruption is detected"
+	select CONFIG_DEBUG_LIST
+	help
+	  Select this option if the kernel should BUG when it encounters
+	  data corruption in kernel memory structures when they get checked
+	  for validity.
 
 	  If unsure, say N.
 

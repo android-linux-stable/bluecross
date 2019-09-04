@@ -34,6 +34,7 @@
 #include <linux/irqchip/arm-gic-common.h>
 #include <linux/irqchip/arm-gic-v3.h>
 #include <linux/irqchip/irq-partition-percpu.h>
+#include <linux/wakeup_reason.h>
 
 #include <asm/cputype.h>
 #include <asm/exception.h>
@@ -228,16 +229,21 @@ void gic_v3_dist_save(void)
 	void __iomem *base = gic_data.dist_base;
 	int reg, i;
 
+	bitmap_zero(irqs_restore, MAX_IRQ);
+
 	for (reg = SAVED_ICFGR; reg < NUM_SAVED_GICD_REGS; reg++) {
 		for_each_spi_irq_word(i, reg) {
 			saved_spi_regs_start[reg][i] =
 				read_spi_word_offset(base, reg, i);
+			changed_spi_regs_start[reg][i] = 0;
 		}
 	}
 
-	for (i = 32; i < IRQ_NR_BOUND(gic_data.irq_nr); i++)
+	for (i = 32; i < IRQ_NR_BOUND(gic_data.irq_nr); i++) {
 		gic_data.saved_spi_router[i] =
 			gic_read_irouter(base + GICD_IROUTER + i * 8);
+		gic_data.changed_spi_router[i] = 0;
+	}
 }
 
 static void _gicd_check_reg(enum gicd_save_restore_reg reg)
@@ -336,7 +342,7 @@ static void _gic_v3_dist_restore_set_reg(u32 offset)
 }
 
 #define _gic_v3_dist_restore_isenabler()		\
-		_gic_v3_dist_restore_set_reg(GICD_ISENABLER)
+		_gic_v3_dist_restore_reg(SAVED_IS_ENABLER)
 
 #define _gic_v3_dist_restore_ispending()		\
 		_gic_v3_dist_restore_set_reg(GICD_ISPENDR)
@@ -414,7 +420,7 @@ static void _gic_v3_dist_clear_reg(u32 offset)
  *
  * 5. Set pending for the interrupt.
  *
- * 6. Enable interrupt and wait for its completion.
+ * 6. Restore Enable bit of interrupt and wait for its completion.
  *
  */
 void gic_v3_dist_restore(void)
@@ -776,6 +782,8 @@ static asmlinkage void __exception_irq_entry gic_handle_irq(struct pt_regs *regs
 			err = handle_domain_irq(gic_data.domain, irqnr, regs);
 			if (err) {
 				WARN_ONCE(true, "Unexpected interrupt received!\n");
+				log_bad_wake_reason("unmapped HW IRQ %u",
+						    irqnr);
 				if (static_key_true(&supports_deactivate)) {
 					if (irqnr < 8192)
 						gic_write_dir(irqnr);

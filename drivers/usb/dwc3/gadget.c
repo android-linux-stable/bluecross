@@ -3043,6 +3043,9 @@ static void dwc3_stop_active_transfers(struct dwc3 *dwc)
 		if (!(dep->flags & DWC3_EP_ENABLED))
 			continue;
 
+		if (dep->endpoint.ep_type == EP_TYPE_GSI && dep->direction)
+			dwc3_notify_event(dwc,
+					DWC3_CONTROLLER_NOTIFY_CLEAR_DB, 0);
 		dwc3_remove_requests(dwc, dep);
 	}
 }
@@ -3744,6 +3747,8 @@ static irqreturn_t dwc3_check_event_buf(struct dwc3 *dwc)
 	u32 reg;
 
 	evt = dwc->ev_buf;
+	if (!evt)
+		return IRQ_NONE;
 
 	/*
 	 * With PCIe legacy interrupt, test shows that top-half irq handler can

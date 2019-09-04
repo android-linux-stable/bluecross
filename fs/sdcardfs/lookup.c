@@ -18,7 +18,6 @@
  * General Public License.
  */
 
-#define __FS_HAS_ENCRYPTION IS_ENABLED(CONFIG_FS_ENCRYPTION)
 #include <linux/fscrypt.h>
 #include "sdcardfs.h"
 #include "linux/delay.h"
@@ -43,8 +42,6 @@ void sdcardfs_destroy_dentry_cache(void)
 
 void free_dentry_private_data(struct dentry *dentry)
 {
-	if (!dentry || !dentry->d_fsdata)
-		return;
 	kmem_cache_free(sdcardfs_dentry_cachep, dentry->d_fsdata);
 	dentry->d_fsdata = NULL;
 }

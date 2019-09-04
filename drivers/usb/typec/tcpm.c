@@ -392,12 +392,6 @@ static bool tcpm_port_is_disconnected(struct tcpm_port *port)
 
 #ifdef CONFIG_DEBUG_FS
 
-static bool tcpm_log_full(struct tcpm_port *port)
-{
-	return port->logbuffer_tail ==
-		(port->logbuffer_head + 1) % LOG_BUFFER_ENTRIES;
-}
-
 __printf(2, 0)
 static void _tcpm_log(struct tcpm_port *port, const char *fmt, va_list args)
 {
@@ -415,11 +409,6 @@ static void _tcpm_log(struct tcpm_port *port, const char *fmt, va_list args)
 	vsnprintf(tmpbuffer, sizeof(tmpbuffer), fmt, args);
 
 	mutex_lock(&port->logbuffer_lock);
-
-	if (tcpm_log_full(port)) {
-		port->logbuffer_head = max(port->logbuffer_head - 1, 0);
-		strcpy(tmpbuffer, "overflow");
-	}
 
 	if (port->logbuffer_head < 0 ||
 	    port->logbuffer_head >= LOG_BUFFER_ENTRIES) {
@@ -440,6 +429,10 @@ static void _tcpm_log(struct tcpm_port *port, const char *fmt, va_list args)
 		  (unsigned long)ts_nsec, rem_nsec / 1000,
 		  tmpbuffer);
 	port->logbuffer_head = (port->logbuffer_head + 1) % LOG_BUFFER_ENTRIES;
+	if (port->logbuffer_head == port->logbuffer_tail) {
+		port->logbuffer_tail = (port->logbuffer_tail + 1)
+				       % LOG_BUFFER_ENTRIES;
+	}
 
 abort:
 	mutex_unlock(&port->logbuffer_lock);
@@ -536,8 +529,6 @@ static int tcpm_seq_show(struct seq_file *s, void *v)
 		seq_printf(s, "%s\n", port->logbuffer[tail]);
 		tail = (tail + 1) % LOG_BUFFER_ENTRIES;
 	}
-	if (!seq_has_overflowed(s))
-		port->logbuffer_tail = tail;
 	mutex_unlock(&port->logbuffer_lock);
 
 	return 0;
@@ -2114,6 +2105,8 @@ static int tcpm_src_attach(struct tcpm_port *port)
 	if (ret < 0)
 		return ret;
 
+	tcpm_set_cc(port, tcpm_rp_cc(port));
+
 	ret = port->tcpc->set_pd_rx(port->tcpc, true);
 	if (ret < 0)
 		goto out_disable_mux;
@@ -3462,10 +3455,10 @@ static void tcpm_pd_event_handler(struct work_struct *work)
 
 void tcpm_port_reset(struct tcpm_port *port)
 {
-        spin_lock(&port->pd_event_lock);
-        port->pd_events = TCPM_PORT_RESET_EVENT;
-        spin_unlock(&port->pd_event_lock);
-        queue_work(port->wq, &port->event_work);
+	spin_lock(&port->pd_event_lock);
+	port->pd_events = TCPM_PORT_RESET_EVENT;
+	spin_unlock(&port->pd_event_lock);
+	queue_work(port->wq, &port->event_work);
 }
 EXPORT_SYMBOL_GPL(tcpm_port_reset);
 

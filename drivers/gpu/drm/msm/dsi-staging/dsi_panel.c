@@ -1515,8 +1515,6 @@ const char *cmd_set_prop_map[DSI_CMD_SET_MAX] = {
 	"qcom,mdss-dsi-nolp-command",
 	"qcom,mdss-dsi-vr-command",
 	"qcom,mdss-dsi-novr-command",
-	"qcom,mdss-dsi-hbm-command",
-	"qcom,mdss-dsi-nohbm-command",
 	"PPS not parsed from DTSI, generated dynamically",
 	"ROI not parsed from DTSI, generated dynamically",
 	"qcom,mdss-dsi-timing-switch-command",
@@ -1543,8 +1541,6 @@ const char *cmd_set_state_map[DSI_CMD_SET_MAX] = {
 	"qcom,mdss-dsi-nolp-command-state",
 	"qcom,mdss-dsi-vr-command-state",
 	"qcom,mdss-dsi-novr-command-state",
-	"qcom,mdss-dsi-hbm-command-state",
-	"qcom,mdss-dsi-nohbm-command-state",
 	"PPS not parsed from DTSI, generated dynamically",
 	"ROI not parsed from DTSI, generated dynamically",
 	"qcom,mdss-dsi-timing-switch-command-state",
@@ -1725,7 +1721,6 @@ int dsi_panel_parse_dt_cmd_set(struct device_node *of_node,
 
 	return 0;
 }
-
 
 static int dsi_panel_parse_cmd_sets_dt(struct dsi_panel_cmd_set *cmd,
 				       enum dsi_cmd_set_type type,
@@ -3055,6 +3050,9 @@ ssize_t dsi_panel_debugfs_write_reg(struct file *file,
 	size_t len;
 	int rc = 0;
 
+	if (!panel || !panel->panel_initialized)
+		return -EPERM;
+
 	/* calculate length for worst case (1 digit per byte + whitespace) */
 	len = (count + 1) / 2;
 
@@ -3102,6 +3100,9 @@ int dsi_panel_debugfs_read_reg(struct seq_file *seq, void *data)
 	ssize_t rc;
 	size_t len;
 	u8 cmd;
+
+	if (!panel || !panel->panel_initialized)
+		return -EPERM;
 
 	len = panel->debug.reg_read_len;
 	cmd = panel->debug.reg_read_cmd;
@@ -3154,6 +3155,7 @@ static const struct file_operations panel_reg_fops = {
 
 struct debugfs_cmdset_entry {
 	struct dsi_panel *panel;
+	struct dsi_panel_cmd_set *set;
 	enum dsi_cmd_set_type type;
 };
 
@@ -3174,8 +3176,6 @@ struct {
 	{ "no_lp",		DSI_CMD_SET_NOLP },
 	{ "vr",			DSI_CMD_SET_VR },
 	{ "novr",		DSI_CMD_SET_NOVR },
-	{ "hbm",		DSI_CMD_SET_HBM },
-	{ "nohbm",		DSI_CMD_SET_NOHBM },
 };
 
 static inline ssize_t parse_cmdset(struct dsi_panel_cmd_set *set, char *buf,
@@ -3204,6 +3204,22 @@ done:
 	return rc;
 }
 
+static struct dsi_panel_cmd_set *
+get_cmdset_locked(struct debugfs_cmdset_entry *entry)
+{
+	struct dsi_panel *panel = entry->panel;
+
+	if (entry->set)
+		return entry->set;
+
+	if (!panel->cur_mode || !panel->cur_mode->priv_info) {
+		pr_err("Invalid mode for panel [%s]\n", panel->name);
+		return NULL;
+	}
+
+	return &panel->cur_mode->priv_info->cmd_sets[entry->type];
+}
+
 ssize_t dsi_panel_debugfs_write_cmdset(struct file *file,
 				       const char __user *user_buf,
 				       size_t count, loff_t *ppos)
@@ -3213,18 +3229,17 @@ ssize_t dsi_panel_debugfs_write_cmdset(struct file *file,
 	struct dsi_panel *panel = entry->panel;
 	struct dsi_panel_cmd_set tmp_set;
 	struct dsi_panel_cmd_set *set;
-	char *buf;
+	char *buf = NULL;
 	int rc = 0;
 	int i;
 
 	mutex_lock(&panel->panel_lock);
-	if (!panel->cur_mode || !panel->cur_mode->priv_info) {
-		pr_err("Invalid mode for panel [%s]\n", panel->name);
+	set = get_cmdset_locked(entry);
+	if (set == NULL) {
 		mutex_unlock(&panel->panel_lock);
 		return -EINVAL;
 	}
 
-	set = &panel->cur_mode->priv_info->cmd_sets[entry->type];
 	tmp_set = *set;
 
 	buf = kmalloc(count + 1, GFP_KERNEL);
@@ -3267,12 +3282,11 @@ int dsi_panel_debugfs_read_cmdset(struct seq_file *seq, void *data)
 	int i, j;
 
 	mutex_lock(&panel->panel_lock);
-	if (!panel->cur_mode || !panel->cur_mode->priv_info) {
-		pr_err("Invalid mode for panel [%s]\n", panel->name);
+	set = get_cmdset_locked(entry);
+	if (set == NULL) {
 		mutex_unlock(&panel->panel_lock);
 		return -EINVAL;
 	}
-	set = &panel->cur_mode->priv_info->cmd_sets[entry->type];
 
 	for (i = 0; i < set->count; i++) {
 		struct dsi_cmd_desc *cmd = set->cmds + i;
@@ -3307,14 +3321,54 @@ static const struct file_operations panel_cmdset_fops = {
 	.release =	single_release,
 };
 
-static void dsi_panel_debugfs_create_cmdsets(struct dentry *parent,
-					     struct dsi_panel *panel)
+void dsi_panel_debugfs_create_cmdset_files(struct dentry *parent,
+					   struct debugfs_cmdset_entry *entry,
+					   struct dsi_panel *panel,
+					   struct dsi_panel_cmd_set *set,
+					   const char *label,
+					   const size_t size)
+{
+	const char *name;
+	int i;
+
+	for (i = 0; i < size; i++, entry++) {
+		if (set) {
+			name = label;
+			entry->set = set;
+		} else {
+			name = cmdset_list[i].label;
+			entry->type = cmdset_list[i].type;
+		}
+		entry->panel = panel;
+
+		debugfs_create_file(name, 0600, parent,
+				    entry, &panel_cmdset_fops);
+	}
+}
+
+void dsi_panel_debugfs_create_cmdset(struct dentry *parent,
+				     const char *label,
+				     struct dsi_panel *panel,
+				     struct dsi_panel_cmd_set *set)
+{
+	struct device *dev = panel->parent;
+	struct debugfs_cmdset_entry *entry;
+
+	entry = devm_kzalloc(dev, sizeof(*entry), GFP_KERNEL);
+	if (!entry)
+		return;
+
+	dsi_panel_debugfs_create_cmdset_files(parent, entry, panel,
+					      set, label, 1);
+}
+
+static void dsi_panel_debugfs_create_cmdsets_from_list(struct dentry *parent,
+						       struct dsi_panel *panel)
 {
 	struct device *dev = panel->parent;
 	struct debugfs_cmdset_entry *entry;
 	const size_t cmds_size = ARRAY_SIZE(cmdset_list);
 	struct dentry *r;
-	int i;
 
 	r = debugfs_create_dir("cmd_sets", parent);
 	if (IS_ERR(r))
@@ -3324,14 +3378,8 @@ static void dsi_panel_debugfs_create_cmdsets(struct dentry *parent,
 	if (!entry)
 		return;
 
-	for (i = 0; i < cmds_size; i++, entry++) {
-		const char *name = cmdset_list[i].label;
-
-		entry->type = cmdset_list[i].type;
-		entry->panel = panel;
-
-		debugfs_create_file(name, 0600, r, entry, &panel_cmdset_fops);
-	}
+	dsi_panel_debugfs_create_cmdset_files(r, entry, panel,
+					      NULL, NULL, cmds_size);
 }
 
 void dsi_panel_debugfs_init(struct dsi_panel *panel, struct dentry *dir)
@@ -3350,7 +3398,8 @@ void dsi_panel_debugfs_init(struct dsi_panel *panel, struct dentry *dir)
 	debugfs_create_size_t("len", 0600, r, &pdbg->reg_read_len);
 	debugfs_create_file("payload", 0600, r, panel, &panel_reg_fops);
 
-	dsi_panel_debugfs_create_cmdsets(dir, panel);
+	dsi_panel_debugfs_create_cmdsets_from_list(dir, panel);
+	dsi_panel_bl_debugfs_init(dir, panel);
 }
 
 int dsi_panel_drv_init(struct dsi_panel *panel,
@@ -3792,6 +3841,7 @@ int dsi_panel_set_lp1(struct dsi_panel *panel)
 		mutex_unlock(&panel->panel_lock);
 		return rc;
 	}
+	dsi_backlight_hbm_dimming_stop(&panel->bl_config);
 
 	rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_LP1);
 	if (rc)
@@ -3839,6 +3889,7 @@ int dsi_panel_set_lp2(struct dsi_panel *panel)
 		mutex_unlock(&panel->panel_lock);
 		return rc;
 	}
+	dsi_backlight_hbm_dimming_stop(&panel->bl_config);
 
 	rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_LP2);
 	if (rc)
@@ -3895,6 +3946,7 @@ static int dsi_panel_set_vr_locked(struct dsi_panel *panel)
 			panel->name);
 		return -EINVAL;
 	}
+	dsi_backlight_hbm_dimming_stop(&panel->bl_config);
 
 	rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_VR);
 
@@ -3985,13 +4037,12 @@ bool dsi_panel_get_vr_mode(struct dsi_panel *panel)
 	return vr_mode = panel->vr_mode;
 }
 
-static int dsi_panel_update_hbm_locked(struct dsi_panel *panel,
-	bool enable)
+static int dsi_panel_update_hbm_locked(struct dsi_panel *panel, bool enable)
 {
 	struct dsi_backlight_config *bl = &panel->bl_config;
-	int rc = 0;
+	struct hbm_data *hbm = bl->hbm;
 
-	if (!bl->hbm || (panel->hbm_mode == enable))
+	if (!hbm || (panel->hbm_mode == enable))
 		return 0;
 
 	if ((dsi_backlight_get_dpms(bl) != SDE_MODE_DPMS_ON) ||
@@ -4001,16 +4052,23 @@ static int dsi_panel_update_hbm_locked(struct dsi_panel *panel,
 		return -EINVAL;
 	}
 
-	rc = dsi_panel_tx_cmd_set(panel, enable ? DSI_CMD_SET_HBM :
-		DSI_CMD_SET_NOHBM);
-	if (rc) {
-		pr_err("[%s] failed to send HBM DSI cmd, rc=%d\n",
-			panel->name, rc);
-		return rc;
+	/* When HBM exit is requested, send HBM exit commands
+	 * immediately to avoid conflict with subsequent backlight ops.
+	 */
+	if (!enable) {
+		int rc = dsi_panel_cmd_set_transfer(panel, &hbm->exit_cmd);
+
+		if (rc)
+			pr_err("[%s] failed to send HBM exit cmd, rc=%d\n",
+				panel->name, rc);
+
+		dsi_backlight_hbm_dimming_start(bl,
+			hbm->exit_num_dimming_frames,
+			&hbm->exit_dimming_stop_cmd);
 	}
 
 	panel->hbm_mode = enable;
-	bl->hbm->cur_range = HBM_RANGE_MAX;
+	hbm->cur_range = HBM_RANGE_MAX;
 
 	return 0;
 }
@@ -4354,6 +4412,7 @@ int dsi_panel_disable(struct dsi_panel *panel)
 	if (rc)
 		pr_warn("[%s] couldn't disable HBM mode to unprepare display\n",
 			panel->name);
+	dsi_backlight_hbm_dimming_stop(&panel->bl_config);
 
 	rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_OFF);
 	if (rc) {

@@ -94,13 +94,41 @@ struct hbm_range {
 	u32 panel_bri_end;
 
 	/* Command to be sent to the panel when entering this HBM range */
-	struct dsi_panel_cmd_set dsi_cmd;
+	struct dsi_panel_cmd_set entry_cmd;
+	/*
+	 * Command to be sent to the panel to stop brightness dimming while
+	 * in this HBM range.
+	 */
+	struct dsi_panel_cmd_set dimming_stop_cmd;
+	/* Number of frames dimming will take. */
+	u32 num_dimming_frames;
 };
 
 struct hbm_data {
+	/* Command to be sent to the panel when exiting HBM */
+	struct dsi_panel_cmd_set exit_cmd;
+	/* Command to be sent to the panel to stop brightness dimming */
+	struct dsi_panel_cmd_set exit_dimming_stop_cmd;
+	/* Number of frames dimming will take */
+	u32 exit_num_dimming_frames;
+
 	struct hbm_range ranges[HBM_RANGE_MAX];
 	u32 num_ranges;
 	u32 cur_range;
+
+	/* Brightness dimming currently active */
+	bool dimming_active;
+	/* Total number of frames brightness dimming takes */
+	u32 dimming_frames_total;
+	/* Number of frames remaining until brightness settles */
+	u32 dimming_frames_left;
+	/* DSI command to send once brightness dimming settles */
+	struct dsi_panel_cmd_set *dimming_stop_cmd;
+
+	/* Work queue used to count frames during dimming */
+	struct workqueue_struct *dimming_workq;
+	struct work_struct dimming_work;
+	struct dsi_panel *panel;
 };
 
 struct dsi_backlight_config {
@@ -142,6 +170,14 @@ struct dsi_backlight_config {
 	 * @bl_cfg - ptr to backlight config struct
 	 */
 	void (*unregister)(struct dsi_backlight_config *bl_cfg);
+
+	/**
+	 * debugfs_init - debugfs initialization for DSI backlight
+	 * @parent - dentry to create
+	 * @bl_cfg - ptr to backlight config struct
+	 */
+	void (*debugfs_init)(struct dentry *parent,
+			     struct dsi_backlight_config *bl_cfg);
 };
 
 struct dsi_reset_seq {
@@ -380,16 +416,25 @@ int dsi_panel_parse_dt_cmd_set(struct device_node *of_node,
 			       const char *cmd_state_str,
 			       struct dsi_panel_cmd_set *cmd);
 void dsi_panel_destroy_cmd_packets(struct dsi_panel_cmd_set *set);
+void dsi_panel_debugfs_create_cmdset(struct dentry *parent,
+				     const char *label,
+				     struct dsi_panel *panel,
+				     struct dsi_panel_cmd_set *set);
 
 int dsi_backlight_early_dpms(struct dsi_backlight_config *bl, int power_state);
 int dsi_backlight_late_dpms(struct dsi_backlight_config *bl, int power_state);
 
 int dsi_backlight_get_dpms(struct dsi_backlight_config *bl);
 
+int dsi_backlight_hbm_dimming_start(struct dsi_backlight_config *bl,
+	u32 num_frames, struct dsi_panel_cmd_set *stop_cmd);
+void dsi_backlight_hbm_dimming_stop(struct dsi_backlight_config *bl);
+
 int dsi_panel_bl_register(struct dsi_panel *panel);
 int dsi_panel_bl_unregister(struct dsi_panel *panel);
 int dsi_panel_bl_parse_config(struct device *parent,
 		struct dsi_backlight_config *bl, struct device_node *of_node);
+void dsi_panel_bl_debugfs_init(struct dentry *parent, struct dsi_panel *panel);
 
 int dsi_panel_update_vr_mode(struct dsi_panel *panel, bool enable);
 bool dsi_panel_get_vr_mode(struct dsi_panel *panel);

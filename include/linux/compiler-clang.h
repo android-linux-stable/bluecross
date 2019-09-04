@@ -16,12 +16,39 @@
  */
 #define __UNIQUE_ID(prefix) __PASTE(__PASTE(__UNIQUE_ID_, prefix), __COUNTER__)
 
+/*
+ * GCC does not warn about unused static inline functions for
+ * -Wunused-function.  This turns out to avoid the need for complex #ifdef
+ * directives.  Suppress the warning in clang as well.
+ */
+#undef inline
+#define inline inline __attribute__((unused)) notrace
+
 #undef __no_sanitize_address
 #define __no_sanitize_address __attribute__((no_sanitize("address")))
 
 /* Clang doesn't have a way to turn it off per-function, yet. */
 #ifdef __noretpoline
 #undef __noretpoline
+#endif
+
+#ifdef CONFIG_LTO_CLANG
+#ifdef CONFIG_FTRACE_MCOUNT_RECORD
+#define __norecordmcount \
+	__attribute__((__section__(".text..ftrace")))
+#endif
+
+#define __nocfi		__attribute__((no_sanitize("cfi")))
+#endif
+
+#define __noscs		__attribute__((no_sanitize("shadow-call-stack")))
+
+/* all clang versions usable with the kernel support KASAN ABI version 5 */
+#define KASAN_ABI_VERSION 5
+
+/* emulate gcc's __SANITIZE_ADDRESS__ flag */
+#if __has_feature(address_sanitizer)
+#define __SANITIZE_ADDRESS__
 #endif
 
 /*
@@ -36,38 +63,4 @@
     __has_builtin(__builtin_add_overflow) && \
     __has_builtin(__builtin_sub_overflow)
 #define COMPILER_HAS_GENERIC_BUILTIN_OVERFLOW 1
-#endif
-
-/*
- * GCC does not warn about unused static inline functions for
- * -Wunused-function.  This turns out to avoid the need for complex #ifdef
- * directives.  Suppress the warning in clang as well.
- */
-#undef inline
-#define inline inline __attribute__((unused)) notrace
-
-#ifdef CONFIG_LTO_CLANG
-#ifdef CONFIG_FTRACE_MCOUNT_RECORD
-#define __norecordmcount \
-	__attribute__((__section__(".text..ftrace")))
-#endif
-
-#define __nocfi		__attribute__((no_sanitize("cfi")))
-#endif
-
-#define __nosafestack	__attribute__((no_sanitize("safe-stack")))
-
-/* all clang versions usable with the kernel support KASAN ABI version 5 */
-#define KASAN_ABI_VERSION 5
-
-/* emulate gcc's __SANITIZE_ADDRESS__ flag */
-#if __has_feature(address_sanitizer)
-#define __SANITIZE_ADDRESS__
-#endif
-
-#undef __no_sanitize_address
-#if __has_feature(address_sanitizer)
-#define __no_sanitize_address __attribute__((no_sanitize("kernel-address")))
-#else
-#define __no_sanitize_address
 #endif

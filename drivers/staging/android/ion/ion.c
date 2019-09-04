@@ -47,6 +47,15 @@
 #include "ion_priv.h"
 #include "compat_ion.h"
 
+/*
+ * For fragmentation analysis,
+ * Group allocations of order 10 and above together
+ */
+#define ION_DEBUG_MAX_ORDER	10
+#define ION_DEBUG_ROW_HEADER  "       " \
+	"4K       8K      16K      32K      64K     128K     256K     " \
+	"512K       1M       2M       4M      >=8M"
+
 /**
  * struct ion_device - the metadata of the ion device node
  * @dev:		the actual misc device
@@ -265,6 +274,8 @@ static struct ion_buffer *ion_buffer_create(struct ion_heap *heap,
 	mutex_lock(&dev->buffer_lock);
 	ion_buffer_add(dev, buffer);
 	mutex_unlock(&dev->buffer_lock);
+	trace_ion_heap_grow(heap->name, len,
+				atomic_long_read(&heap->total_allocated));
 	atomic_long_add(len, &heap->total_allocated);
 	return buffer;
 
@@ -286,6 +297,8 @@ void ion_buffer_destroy(struct ion_buffer *buffer)
 	}
 	buffer->heap->ops->unmap_dma(buffer->heap, buffer);
 
+	trace_ion_heap_shrink(buffer->heap->name,  buffer->size,
+				atomic_long_read(&buffer->heap->total_allocated));
 	atomic_long_sub(buffer->size, &buffer->heap->total_allocated);
 	buffer->heap->ops->free(buffer);
 	vfree(buffer->pages);
@@ -868,7 +881,7 @@ static int ion_debug_client_show(struct seq_file *s, void *unused)
 		struct ion_handle *handle = rb_entry(n, struct ion_handle,
 						     node);
 
-		seq_printf(s, "%16.16s: %16zx : %16d : %12p",
+		seq_printf(s, "%16.16s: %16zx : %16d : %12pK",
 			   handle->buffer->heap->name,
 			   handle->buffer->size,
 			   atomic_read(&handle->ref.refcount),
@@ -1216,9 +1229,6 @@ static void ion_buffer_sync_for_device(struct ion_buffer *buffer,
 	int pages = PAGE_ALIGN(buffer->size) / PAGE_SIZE;
 	int i;
 
-	pr_debug("%s: syncing for device %s\n", __func__,
-		 dev ? dev_name(dev) : "null");
-
 	if (!ion_buffer_fault_user_mappings(buffer))
 		return;
 
@@ -1280,7 +1290,6 @@ static void ion_vm_close(struct vm_area_struct *vma)
 	struct ion_buffer *buffer = vma->vm_private_data;
 	struct ion_vma_list *vma_list, *tmp;
 
-	pr_debug("%s\n", __func__);
 	mutex_lock(&buffer->lock);
 	list_for_each_entry_safe(vma_list, tmp, &buffer->vmas, list) {
 		if (vma_list->vma != vma)
@@ -1683,7 +1692,6 @@ static int ion_release(struct inode *inode, struct file *file)
 {
 	struct ion_client *client = file->private_data;
 
-	pr_debug("%s: %d\n", __func__, __LINE__);
 	ion_client_destroy(client);
 	return 0;
 }
@@ -1695,7 +1703,6 @@ static int ion_open(struct inode *inode, struct file *file)
 	struct ion_client *client;
 	char debug_name[64];
 
-	pr_debug("%s: %d\n", __func__, __LINE__);
 	snprintf(debug_name, 64, "%u", task_pid_nr(current->group_leader));
 	client = ion_client_create(dev, debug_name);
 	if (IS_ERR(client))
@@ -1713,8 +1720,72 @@ static const struct file_operations ion_fops = {
 	.compat_ioctl   = compat_ion_ioctl,
 };
 
-static size_t ion_debug_heap_total(struct ion_client *client,
-				   unsigned int id)
+static long _page_size(int order)
+{
+	return (1 << (PAGE_SHIFT + order));
+}
+
+static dma_addr_t _page_mask(int order)
+{
+	return  (dma_addr_t)(_page_size(order) - 1);
+}
+
+static void ion_debug_update_orders(struct ion_buffer *buffer,
+				    size_t *orders)
+{
+	struct scatterlist *sg;
+	struct sg_table *table = buffer->sg_table;
+	int i;
+	long length = 0;
+	dma_addr_t start = sg_phys(table->sgl);
+
+	if (!table)
+		return;
+
+	for_each_sg(table->sgl, sg, table->nents, i) {
+		int order;
+
+		length += sg->length;
+		/* Account physically contiguous entries as one big region */
+		if ((i + 1) < table->nents  &&
+		    (sg_phys(sg) + sg->length) == sg_phys(sg_next(sg))) {
+			continue;
+		}
+		do {
+			order = get_order(length);
+			/*
+			 * A contiguous memory region may be made out of
+			 * multiple entries, and it may appear to be of a higher
+			 * order. However, if the region starts at an address
+			 * that is not aligned to the page order, it must be
+			 * split. Reduce the order until the start address is
+			 * aligned with it.
+			 */
+			while (order && (_page_mask(order) & start))
+				order--;
+			if (order > ION_DEBUG_MAX_ORDER) {
+				orders[ION_DEBUG_MAX_ORDER + 1] += length;
+				break;
+			}
+			orders[order]++;
+			/*
+			 * We have accounted a chunk of memory that may have
+			 * been misaligned. Update our counters and continue
+			 * until we account for all memory in the contiguous
+			 * region
+			 */
+			length -= _page_size(order);
+			start += _page_size(order);
+		} while (length > 0);
+		/*  Reached the end of the contiguous memory region */
+		length = 0;
+		if ((i + 1) < table->nents)
+			start = sg_phys(sg_next(sg));
+	}
+}
+
+static size_t ion_debug_heap_totals(struct ion_client *client,
+				    unsigned int id, size_t *orders)
 {
 	size_t size = 0;
 	struct rb_node *n;
@@ -1724,8 +1795,10 @@ static size_t ion_debug_heap_total(struct ion_client *client,
 		struct ion_handle *handle = rb_entry(n,
 						     struct ion_handle,
 						     node);
-		if (handle->buffer->heap->id == id)
+		if (handle->buffer->heap->id == id) {
 			size += handle->buffer->size;
+			ion_debug_update_orders(handle->buffer, orders);
+		}
 	}
 	mutex_unlock(&client->lock);
 	return size;
@@ -1843,14 +1916,18 @@ static int ion_debug_heap_show(struct seq_file *s, void *unused)
 	size_t total_size = 0;
 	size_t total_orphaned_size = 0;
 
-	seq_printf(s, "%16s %16s %16s\n", "client", "pid", "size");
-	seq_puts(s, "----------------------------------------------------\n");
+	seq_printf(s, "%16s %16s %16s %16s\n", "client", "pid", "size",
+		   "page counts");
+	seq_puts(s, "--------------------------------------------------"
+				ION_DEBUG_ROW_HEADER "\n");
 
 	down_read(&dev->lock);
 	for (n = rb_first(&dev->clients); n; n = rb_next(n)) {
 		struct ion_client *client = rb_entry(n, struct ion_client,
 						     node);
-		size_t size = ion_debug_heap_total(client, heap->id);
+		int i;
+		size_t orders[ION_DEBUG_MAX_ORDER + 2] = {};
+		size_t size = ion_debug_heap_totals(client, heap->id, orders);
 
 		if (!size)
 			continue;
@@ -1858,12 +1935,17 @@ static int ion_debug_heap_show(struct seq_file *s, void *unused)
 			char task_comm[TASK_COMM_LEN];
 
 			get_task_comm(task_comm, client->task);
-			seq_printf(s, "%16s %16u %16zu\n", task_comm,
+			seq_printf(s, "%16s %16u %16zu ", task_comm,
 				   client->pid, size);
 		} else {
-			seq_printf(s, "%16s %16u %16zu\n", client->name,
+			seq_printf(s, "%16s %16u %16zu ", client->name,
 				   client->pid, size);
 		}
+		for (i = 0; i < ION_DEBUG_MAX_ORDER + 1; i++)
+			seq_printf(s, "%8zu ", orders[i]);
+		seq_printf(s, "%8zuM", orders[i] / (1024 * 1024));
+		seq_puts(s, "\n");
+
 	}
 	up_read(&dev->lock);
 
