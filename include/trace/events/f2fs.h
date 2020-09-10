@@ -526,6 +526,37 @@ TRACE_EVENT(f2fs_truncate_partial_nodes,
 		__entry->err)
 );
 
+TRACE_EVENT(f2fs_file_write_iter,
+
+	TP_PROTO(struct inode *inode, unsigned long offset,
+		unsigned long length, int ret),
+
+	TP_ARGS(inode, offset, length, ret),
+
+	TP_STRUCT__entry(
+		__field(dev_t,	dev)
+		__field(ino_t,	ino)
+		__field(unsigned long, offset)
+		__field(unsigned long, length)
+		__field(int,	ret)
+	),
+
+	TP_fast_assign(
+		__entry->dev	= inode->i_sb->s_dev;
+		__entry->ino	= inode->i_ino;
+		__entry->offset	= offset;
+		__entry->length	= length;
+		__entry->ret	= ret;
+	),
+
+	TP_printk("dev = (%d,%d), ino = %lu, "
+		"offset = %lu, length = %lu, written(err) = %d",
+		show_dev_ino(__entry),
+		__entry->offset,
+		__entry->length,
+		__entry->ret)
+);
+
 TRACE_EVENT(f2fs_map_blocks,
 	TP_PROTO(struct inode *inode, struct f2fs_map_blocks *map, int ret),
 
@@ -990,8 +1021,8 @@ DECLARE_EVENT_CLASS(f2fs__submit_page_bio,
 	),
 
 	TP_fast_assign(
-		__entry->dev		= page->mapping->host->i_sb->s_dev;
-		__entry->ino		= page->mapping->host->i_ino;
+		__entry->dev		= page_file_mapping(page)->host->i_sb->s_dev;
+		__entry->ino		= page_file_mapping(page)->host->i_ino;
 		__entry->index		= page->index;
 		__entry->old_blkaddr	= fio->old_blkaddr;
 		__entry->new_blkaddr	= fio->new_blkaddr;
@@ -1178,10 +1209,11 @@ DECLARE_EVENT_CLASS(f2fs__page,
 	),
 
 	TP_fast_assign(
-		__entry->dev	= page->mapping->host->i_sb->s_dev;
-		__entry->ino	= page->mapping->host->i_ino;
+		__entry->dev	= page_file_mapping(page)->host->i_sb->s_dev;
+		__entry->ino	= page_file_mapping(page)->host->i_ino;
 		__entry->type	= type;
-		__entry->dir	= S_ISDIR(page->mapping->host->i_mode);
+		__entry->dir	=
+			S_ISDIR(page_file_mapping(page)->host->i_mode);
 		__entry->index	= page->index;
 		__entry->dirty	= PageDirty(page);
 		__entry->uptodate = PageUptodate(page);
@@ -1244,6 +1276,32 @@ DEFINE_EVENT(f2fs__page, f2fs_commit_inmem_page,
 	TP_PROTO(struct page *page, int type),
 
 	TP_ARGS(page, type)
+);
+
+TRACE_EVENT(f2fs_filemap_fault,
+
+	TP_PROTO(struct inode *inode, pgoff_t index, unsigned long ret),
+
+	TP_ARGS(inode, index, ret),
+
+	TP_STRUCT__entry(
+		__field(dev_t,	dev)
+		__field(ino_t,	ino)
+		__field(pgoff_t, index)
+		__field(unsigned long, ret)
+	),
+
+	TP_fast_assign(
+		__entry->dev	= inode->i_sb->s_dev;
+		__entry->ino	= inode->i_ino;
+		__entry->index	= index;
+		__entry->ret	= ret;
+	),
+
+	TP_printk("dev = (%d,%d), ino = %lu, index = %lu, ret = %lx",
+		show_dev_ino(__entry),
+		(unsigned long)__entry->index,
+		__entry->ret)
 );
 
 TRACE_EVENT(f2fs_writepages,
@@ -1652,6 +1710,77 @@ TRACE_EVENT(f2fs_shutdown,
 		show_dev(__entry->dev),
 		show_shutdown_mode(__entry->mode),
 		__entry->ret)
+);
+
+TRACE_EVENT(f2fs_iostat,
+
+	TP_PROTO(struct f2fs_sb_info *sbi, unsigned long long *iostat),
+
+	TP_ARGS(sbi, iostat),
+
+	TP_STRUCT__entry(
+		__field(dev_t,	dev)
+		__field(unsigned long long,	app_dio)
+		__field(unsigned long long,	app_bio)
+		__field(unsigned long long,	app_wio)
+		__field(unsigned long long,	app_mio)
+		__field(unsigned long long,	fs_dio)
+		__field(unsigned long long,	fs_nio)
+		__field(unsigned long long,	fs_mio)
+		__field(unsigned long long,	fs_gc_dio)
+		__field(unsigned long long,	fs_gc_nio)
+		__field(unsigned long long,	fs_cp_dio)
+		__field(unsigned long long,	fs_cp_nio)
+		__field(unsigned long long,	fs_cp_mio)
+		__field(unsigned long long,	app_drio)
+		__field(unsigned long long,	app_brio)
+		__field(unsigned long long,	app_rio)
+		__field(unsigned long long,	app_mrio)
+		__field(unsigned long long,	fs_drio)
+		__field(unsigned long long,	fs_nrio)
+		__field(unsigned long long,	fs_mrio)
+		__field(unsigned long long,	fs_discard)
+	),
+
+	TP_fast_assign(
+		__entry->dev		= sbi->sb->s_dev;
+		__entry->app_dio	= iostat[APP_DIRECT_IO];
+		__entry->app_bio	= iostat[APP_BUFFERED_IO];
+		__entry->app_wio	= iostat[APP_WRITE_IO];
+		__entry->app_mio	= iostat[APP_MAPPED_IO];
+		__entry->fs_dio		= iostat[FS_DATA_IO];
+		__entry->fs_nio		= iostat[FS_NODE_IO];
+		__entry->fs_mio		= iostat[FS_META_IO];
+		__entry->fs_gc_dio	= iostat[FS_GC_DATA_IO];
+		__entry->fs_gc_nio	= iostat[FS_GC_NODE_IO];
+		__entry->fs_cp_dio	= iostat[FS_CP_DATA_IO];
+		__entry->fs_cp_nio	= iostat[FS_CP_NODE_IO];
+		__entry->fs_cp_mio	= iostat[FS_CP_META_IO];
+		__entry->app_drio	= iostat[APP_DIRECT_READ_IO];
+		__entry->app_brio	= iostat[APP_BUFFERED_READ_IO];
+		__entry->app_rio	= iostat[APP_READ_IO];
+		__entry->app_mrio	= iostat[APP_MAPPED_READ_IO];
+		__entry->fs_drio	= iostat[FS_DATA_READ_IO];
+		__entry->fs_nrio	= iostat[FS_NODE_READ_IO];
+		__entry->fs_mrio	= iostat[FS_META_READ_IO];
+		__entry->fs_discard	= iostat[FS_DISCARD];
+	),
+
+	TP_printk("dev = (%d,%d), "
+		"app [write=%llu (direct=%llu, buffered=%llu), mapped=%llu], "
+		"fs [data=%llu, node=%llu, meta=%llu, discard=%llu], "
+		"gc [data=%llu, node=%llu], "
+		"cp [data=%llu, node=%llu, meta=%llu], "
+		"app [read=%llu (direct=%llu, buffered=%llu), mapped=%llu], "
+		"fs [data=%llu, node=%llu, meta=%llu]",
+		show_dev(__entry->dev), __entry->app_wio, __entry->app_dio,
+		__entry->app_bio, __entry->app_mio, __entry->fs_dio,
+		__entry->fs_nio, __entry->fs_mio, __entry->fs_discard,
+		__entry->fs_gc_dio, __entry->fs_gc_nio, __entry->fs_cp_dio,
+		__entry->fs_cp_nio, __entry->fs_cp_mio,
+		__entry->app_rio, __entry->app_drio, __entry->app_brio,
+		__entry->app_mrio, __entry->fs_drio, __entry->fs_nrio,
+		__entry->fs_mrio)
 );
 
 #endif /* _TRACE_F2FS_H */
